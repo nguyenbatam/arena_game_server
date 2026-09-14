@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Arena — account, store and ladder</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  :root { --bg:#0b1020; --panel:#121a33; --line:#2a3a6a; --txt:#dce6ff; --acc:#5eead4; --warn:#f43f5e; --me:#38bdf8; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--bg); color:var(--txt); font:14px/1.5 ui-sans-serif,system-ui; }
+  main { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:18px; letter-spacing:.04em; margin:0 0 4px; }
+  h2 { font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--acc); margin:0 0 12px; }
+  a { color:var(--acc); }
+  .muted { color:#8aa; font-size:12px; }
+  .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); margin-top:16px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  input, button, select { background:#1b2550; color:var(--txt); border:1px solid var(--line); padding:8px 10px; border-radius:8px; font:inherit; }
+  input { width:100%; margin:4px 0; }
+  button { cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--acc); }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:5px 0; border-bottom:1px solid #ffffff0d; }
+  .row:last-child { border-bottom:0; }
+  .row b { font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th { text-align:left; font-weight:600; color:#8aa; font-size:11px; text-transform:uppercase; letter-spacing:.06em; padding:0 8px 6px 0; }
+  td { padding:5px 8px 5px 0; border-top:1px solid #ffffff0d; }
+  .win { color:var(--acc); } .loss { color:var(--warn); }
+  .item { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid #ffffff0d; }
+  .item:last-child { border-bottom:0; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button { flex:1; }
+  .tabs button[aria-selected="true"] { border-color:var(--acc); color:var(--acc); }
+  #log { font:11px/1.4 ui-monospace,monospace; white-space:pre-wrap; color:#9bb; max-height:160px; overflow:auto; margin-top:12px; }
+  .off { border-color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>ARENA — PLATFORM TIER</h1>
+  <div class="muted">
+    Accounts, wallet, store, match history and the ladder — the half of a game backend that is not realtime.
+    Play at <a href="/">arena</a> or <a href="/turn.html">turn-based</a>; matches you finish while signed in land in the history below.
+  </div>
+
+  <div class="grid">
+    <section id="authPanel">
+      <h2>Account</h2>
+      <div class="tabs">
+        <button id="tabLogin" aria-selected="true">Sign in</button>
+        <button id="tabRegister" aria-selected="false">Register</button>
+      </div>
+      <input id="username" placeholder="username" autocomplete="username"/>
+      <input id="password" type="password" placeholder="password (8+ characters)" autocomplete="current-password"/>
+      <input id="displayName" placeholder="display name (optional)" hidden/>
+      <button id="submitAuth" style="width:100%;margin-top:8px">Sign in</button>
+      <p class="muted" id="authHint"></p>
+    </section>
+
+    <section id="profilePanel" hidden>
+      <h2>Profile</h2>
+      <div class="row"><span>display name</span><b id="pName">—</b></div>
+      <div class="row"><span>account id</span><b id="pId">—</b></div>
+      <div class="row"><span>rating</span><b id="pRating">—</b></div>
+      <div class="row"><span>matches / wins</span><b id="pMatches">—</b></div>
+      <div class="row"><span>kills</span><b id="pKills">—</b></div>
+      <div class="row"><span>currency</span><b id="pCurrency">—</b></div>
+      <button id="signOut" style="width:100%;margin-top:12px">Sign out</button>
+    </section>
+
+    <section>
+      <h2>Store</h2>
+      <div id="catalog" class="muted">loading…</div>
+    </section>
+
+    <section id="inventoryPanel" hidden>
+      <h2>Inventory</h2>
+      <div id="inventory" class="muted">nothing yet</div>
+    </section>
+
+    <section id="historyPanel" hidden>
+      <h2>Match history</h2>
+      <div id="history" class="muted">no matches yet</div>
+    </section>
+
+    <section>
+      <h2>Leaderboard</h2>
+      <div id="leaderboard" class="muted">loading…</div>
+    </section>
+  </div>
+
+  <div id="log"></div>
+</main>
+
+<script src="/platform.js"></script>
+<script>
+// The session is shared with the game pages through localStorage: sign in here,
+// then play, and the match that ends lands in the history above. The arena page
+// reads the same key rather than calling /auth/login with a bare name, which
+// stops working the moment the platform tier is on — there is no anonymous door
+// left once every read is authorised by a token.
+const SESSION_KEY = 'arena.session';
+
+const logEl = document.getElementById('log');
+const log = s => { logEl.textContent = s + '\n' + logEl.textContent; };
+
+// The parsing and expiry rules live in /platform.js, shared with the two game
+// pages and pinned from Go — three copies of "is this token still good" is
+// exactly how one of them drifts.
+function session() {
+  try {
+    return sessionFrom(localStorage.getItem(SESSION_KEY), Date.now());
+  } catch { return null; }
+}
+function setSession(s) {
+  if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+async function api(path, { method = 'GET', body, auth = false } = {}) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (auth) {
+    const s = session();
+    if (!s) throw new Error('signed out');
+    headers['Authorization'] = 'Bearer ' + s.token;
+  }
+  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (r.status === 404 && path.startsWith('/platform')) {
+    throw new Error('the platform tier is off — start the server with PLATFORM_DSN set');
+  }
+  if (r.status === 401 && auth) {
+    setSession(null);
+    render();
+    throw new Error('session expired — sign in again');
+  }
+  if (!r.ok) throw new Error((await r.text()).trim() || ('http ' + r.status));
+  return r.json();
+}
+
+// --- auth ------------------------------------------------------------------
+
+let mode = 'login';
+const tabLogin = document.getElementById('tabLogin');
+const tabRegister = document.getElementById('tabRegister');
+const displayName = document.getElementById('displayName');
+const submitAuth = document.getElementById('submitAuth');
+
+function setMode(next) {
+  mode = next;
+  tabLogin.setAttribute('aria-selected', String(mode === 'login'));
+  tabRegister.setAttribute('aria-selected', String(mode === 'register'));
+  displayName.hidden = mode !== 'register';
+  submitAuth.textContent = mode === 'login' ? 'Sign in' : 'Create account';
+  document.getElementById('authHint').textContent = mode === 'login'
+    ? 'Registering signs you in as well — one round trip, not two.'
+    : 'Usernames are letters, digits and _-. ; they are matched without case.';
+}
+tabLogin.onclick = () => setMode('login');
+tabRegister.onclick = () => setMode('register');
+
+submitAuth.onclick = async () => {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  submitAuth.disabled = true;
+  try {
+    const path = mode === 'login' ? '/auth/login' : '/auth/register';
+    const body = mode === 'login'
+      ? { username, password }
+      : { username, password, display_name: displayName.value.trim() };
+    const s = await api(path, { method: 'POST', body });
+    setSession(s);
+    log((mode === 'login' ? 'signed in' : 'registered') + ' as ' + s.account.display_name);
+    await render();
+  } catch (e) {
+    log('auth failed: ' + e.message);
+  } finally {
+    submitAuth.disabled = false;
+  }
+};
+
+document.getElementById('signOut').onclick = () => {
+  setSession(null);
+  log('signed out');
+  render();
+};
+
+// --- rendering -------------------------------------------------------------
+
+const fmt = n => new Intl.NumberFormat().format(n);
+
+async function renderProfile() {
+  const { account, profile } = await api('/platform/profile', { auth: true });
+  document.getElementById('pName').textContent = account.display_name;
+  document.getElementById('pId').textContent = account.id;
+  document.getElementById('pRating').textContent = fmt(profile.rating);
+  document.getElementById('pMatches').textContent = fmt(profile.matches) + ' / ' + fmt(profile.wins);
+  document.getElementById('pKills').textContent = fmt(profile.kills);
+  document.getElementById('pCurrency').textContent = fmt(profile.currency);
+}
+
+async function renderInventory() {
+  const { items } = await api('/platform/inventory', { auth: true });
+  const el = document.getElementById('inventory');
+  if (!items.length) { el.className = 'muted'; el.textContent = 'nothing yet — buy something from the store'; return; }
+  el.className = '';
+  el.innerHTML = items.map(i =>
+    `<div class="item"><span>${esc(i.item_id)}</span><b>x${i.qty}</b></div>`).join('');
+}
+
+async function renderHistory() {
+  const { matches } = await api('/platform/history?limit=10', { auth: true });
+  const el = document.getElementById('history');
+  if (!matches.length) { el.className = 'muted'; el.textContent = 'no matches yet — go and play one'; return; }
+  el.className = '';
+  el.innerHTML = `<table><tr><th>when</th><th>mode</th><th>place</th><th>score</th><th>rating</th><th>reward</th></tr>` +
+    matches.map(m => {
+      const delta = m.rating_after - m.rating_before;
+      const rating = ratingDelta(m);
+      return `<tr>
+        <td>${new Date(m.ended_at).toLocaleTimeString()}</td>
+        <td>${esc(m.mode)}</td>
+        <td class="${m.placement === 1 ? 'win' : ''}">${m.placement}</td>
+        <td>${m.score}</td>
+        <td class="${delta > 0 ? 'win' : delta < 0 ? 'loss' : ''}">${rating}</td>
+        <td>+${m.reward}</td>
+      </tr>`;
+    }).join('') + `</table>`;
+}
+
+async function renderCatalog() {
+  const { items } = await api('/platform/catalog');
+  const signedIn = !!session();
+  document.getElementById('catalog').className = '';
+  document.getElementById('catalog').innerHTML = items.map(i => `
+    <div class="item">
+      <span>${esc(i.name)} <span class="muted">· ${esc(i.kind)}${i.max === 1 ? ' · unique' : ''}</span></span>
+      <span><b>${i.price}</b>
+      <button data-item="${esc(i.id)}" ${signedIn ? '' : 'disabled'}>Buy</button></span>
+    </div>`).join('');
+  for (const b of document.querySelectorAll('#catalog button')) b.onclick = () => buy(b);
+}
+
+async function renderLeaderboard() {
+  const { ranks } = await api('/platform/leaderboard?limit=10');
+  const el = document.getElementById('leaderboard');
+  const me = session()?.player_id;
+  if (!ranks.length) {
+    el.className = 'muted';
+    el.textContent = 'nobody has finished a match yet — an account that has never played has no position on a ladder';
+    return;
+  }
+  el.className = '';
+  el.innerHTML = `<table><tr><th>#</th><th>player</th><th>rating</th><th>played</th><th>won</th></tr>` +
+    ranks.map(r => `<tr${r.account_id === me ? ' class="win"' : ''}>
+      <td>${r.rank}</td><td>${esc(r.display_name)}</td>
+      <td>${fmt(r.rating)}</td><td>${r.matches}</td><td>${r.wins}</td>
+    </tr>`).join('') + `</table>`;
+}
+
+// buy sends an idempotency key that survives a retry. KeyRing holds the rule —
+// mint once per attempt, keep it on failure, forget it once answered — and
+// /platform.js explains why each half of that is the way it is.
+const keys = new KeyRing();
+async function buy(button) {
+  const itemID = button.dataset.item;
+  button.disabled = true;
+  try {
+    const rec = await api('/platform/store/buy', {
+      method: 'POST', auth: true,
+      body: { item_id: itemID, qty: 1, idempotency_key: keys.begin(itemID) },
+    });
+    // A replay counts as answered: the original attempt landed.
+    keys.settle(itemID);
+    log(rec.replay
+      ? `${itemID}: already bought with that key — nothing charged`
+      : `${itemID}: bought, balance ${rec.profile.currency}`);
+    await Promise.all([renderProfile(), renderInventory()]);
+  } catch (e) {
+    keys.keep(itemID);
+    log(`${itemID}: ${e.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// render draws everything; poll() draws only what a finished match changes.
+//
+// The split is about the rate limit, and the page was over it — see
+// POLL_INTERVAL_MS in /platform.js, which owns the cadence and is checked
+// against the server's default from Go. The catalog is a price list that
+// changes on a deploy, and the inventory only changes when this page buys
+// something and refreshes it right there, so neither belongs on a timer.
+//
+// poll() must fire exactly POLL_REQUESTS requests. Adding one here without
+// raising that constant makes the budget a lie.
+async function draw(jobs) {
+  for (const r of await Promise.allSettled(jobs)) {
+    if (r.status === 'rejected') log(r.reason.message);
+  }
+}
+
+async function render() {
+  const signedIn = !!session();
+  document.getElementById('authPanel').hidden = signedIn;
+  for (const id of ['profilePanel', 'inventoryPanel', 'historyPanel']) {
+    document.getElementById(id).hidden = !signedIn;
+  }
+  const jobs = [renderCatalog(), renderLeaderboard()];
+  if (signedIn) jobs.push(renderProfile(), renderInventory(), renderHistory());
+  await draw(jobs);
+}
+
+async function poll() {
+  const jobs = [renderLeaderboard()];
+  if (session()) jobs.push(renderProfile(), renderHistory());
+  await draw(jobs);
+}
+
+setMode('login');
+render();
+// How a match played in another tab shows up here.
+setInterval(() => { if (!document.hidden) poll(); }, POLL_INTERVAL_MS);
+</script>
+</body>
+</html>

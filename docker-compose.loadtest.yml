@@ -1,0 +1,24 @@
+# Load-test layer. Use with the base file, never alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
+#   make load-10k          # bots dial ws://localhost:8080/ws
+#
+# Everything it changes lives in backend.loadtest.env, which is applied after
+# backend.env so it wins. Keeping the overrides in the env file rather than
+# inline here is what stops them being invisible: the reason for each one is
+# written next to it.
+services:
+  server:
+    env_file:
+      - path: backend.env
+        required: false
+      - backend.loadtest.env
+    environment:
+      # The platform tier is off for load tests, and this is the one override
+      # that cannot live in backend.loadtest.env: the base file sets
+      # PLATFORM_DSN under `environment:`, which wins over every env_file.
+      #
+      # Off because the run measures the netcode. The bots hold no accounts, so
+      # with the tier on every queue join would be a database read for a row
+      # that does not exist, and the numbers would describe Postgres.
+      PLATFORM_DSN: ""

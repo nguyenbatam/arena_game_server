@@ -1,0 +1,67 @@
+# Clippy equivalent: staticcheck plus extra bug/security checks.
+# Default set already includes errcheck, govet, ineffassign, staticcheck, unused.
+version: "2"
+
+run:
+  relative-path-mode: gomod
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - unconvert
+  settings:
+    errcheck:
+      # Also flag `_ = f()`.
+      #
+      # errcheck's default catches a call whose error is dropped on the floor,
+      # and says nothing about one assigned to the blank identifier — which is
+      # the form every discarded error in this repo actually took. There were
+      # seventy-four of them, across presence, the matchmaking queue, the room
+      # directory, the transports' read and write deadlines and the load
+      # generator's own writes, and the interesting ones were not the ones that
+      # looked risky: a discarded reservation write let two matchmakers place
+      # onto the same node, and a discarded deadline arm left a turn-based match
+      # with nothing counting down for twenty-four hours.
+      #
+      # With this on, ignoring an error is still allowed — it just has to be
+      # written somewhere a reader can see it and a reviewer can ask about it,
+      # rather than being the default that costs nothing to type.
+      check-blank: true
+    gosec:
+      # Intentional truncations (wire types, checksums, replay encoding) and
+      # 0644 replay files. math/rand is not used for secrets here.
+      excludes:
+        - G115
+        - G306
+        - G404
+        - G602
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - gen/
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - gen/

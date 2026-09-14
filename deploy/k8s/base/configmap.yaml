@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arena-static
+  namespace: arena
+data:
+  TICK_RATE: "20"
+  ROOM_SIZE: "8"
+  MIN_PLAYERS: "2"
+  MATCH_SECONDS: "90"
+  QUEUE_TIMEOUT: "2s"
+  DISCONNECT_GRACE: "15s"
+  SHUTDOWN_TIMEOUT: "15s"
+  DRAIN_TIMEOUT: "45s"
+  ENV: production
+  TRUST_PROXY: "true"
+  QUEUE_RATE_LIMIT: "12"
+  LOGIN_RATE_LIMIT: "30"
+  HELLO_RATE_LIMIT: "60"
+  # What one established connection may spend. The limiters above are keyed by
+  # IP and guard the door; these are what stop an authenticated client from
+  # sending inputs as fast as its link allows.
+  CONN_MSG_RATE: "120"
+  CONN_MSG_BURST: "240"
+  CONN_BYTE_RATE: "131072"
+  # Ticks of input held per player to absorb network jitter. A ceiling rather
+  # than a delay: a steady stream is drained every tick.
+  INPUT_BUFFER: "2"
+  # Ceiling on one Redis call made on a player's behalf.
+  REDIS_TIMEOUT: "1s"
+  # The platform tier. PLATFORM_DSN carries a password, so it lives in the
+  # Secret alongside JWT_SECRET rather than here; empty there leaves the tier
+  # off and the realtime tier running on its own.
+  #
+  # PLATFORM_MAX_CONNS is per replica and the deployments scale independently,
+  # so the fleet's worst case is this times (gateways + matchmakers +
+  # gameservers). Size it against the database's max_connections, not against
+  # one pod.
+  PLATFORM_MAX_CONNS: "16"
+  PLATFORM_TIMEOUT: "2s"
+  PLATFORM_RATE_LIMIT: "60"
+  # Skill-based matchmaking: the window widens with the wait, so nobody is held
+  # back for long. SKILL_WINDOW=0 would be a pure FIFO queue.
+  SKILL_WINDOW: "200"
+  SKILL_WIDEN: "100"
+  SKILL_MAX_WINDOW: "1200"
+  KAFKA_TOPIC: arena.events

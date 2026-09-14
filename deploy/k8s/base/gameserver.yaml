@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gameserver
+  namespace: arena
+spec:
+  clusterIP: None
+  selector: { app: gameserver }
+  ports: [{ port: 8080, targetPort: 8080, name: http }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gameserver
+  namespace: arena
+spec:
+  serviceName: gameserver
+  replicas: 2
+  selector:
+    matchLabels: { app: gameserver }
+  template:
+    metadata:
+      labels: { app: gameserver }
+    spec:
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: gameserver
+          image: ghcr.io/nguyenbatam/arena_game_server:latest
+          envFrom: [{ configMapRef: { name: arena-static } }]
+          env:
+            - { name: ROLE, value: gameserver }
+            - { name: NODE_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: HTTP_ADDR, value: ":8080" }
+            - { name: TCP_ADDR, value: ":8081" }
+            - { name: REDIS_ADDR, value: redis:6379 }
+            # How many matches this pod will host. Placement skips a node that
+            # is at its ceiling instead of stacking rooms onto one that has
+            # already run out of tick budget — sized against the CPU limit
+            # below, so raising one means revisiting the other. Refusals show
+            # up as arena_placements_refused_total, which is the signal to
+            # scale the StatefulSet.
+            - { name: MAX_ROOMS, value: "200" }
+            - name: PUBLIC_ADDR
+              value: "ws://$(NODE_ID).gameserver.arena.svc.cluster.local:8080/ws"
+            - name: ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: arena-admin, key: ADMIN_TOKEN } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: arena-admin, key: JWT_SECRET } }
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: arena-admin, key: REDIS_PASSWORD } }
+            # Every role needs the pool: the gateway serves the HTTP surface,
+            # the matchmaker reads ratings and ends abandoned turn matches, and
+            # the game servers write match results. Empty leaves it off.
+            - name: PLATFORM_DSN
+              valueFrom: { secretKeyRef: { name: arena-admin, key: PLATFORM_DSN } }
+          ports: [{ containerPort: 8080, name: http }, { containerPort: 8081, name: tcp }]
+          startupProbe: { httpGet: { path: /readyz, port: http }, failureThreshold: 30, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5 }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "8"] }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gameserver
+  namespace: arena
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: gameserver }

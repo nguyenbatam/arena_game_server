@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/nguyenbatam/arena_game_server
+    newTag: latest
+replicas:
+  - name: gateway
+    count: 3
+  - name: gameserver
+    count: 4
+patches:
+  - path: patch-gateway-public.yaml
+  - path: patch-ingress-host.yaml

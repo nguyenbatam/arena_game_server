@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: arena
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: gateway }
+  template:
+    metadata:
+      labels: { app: gateway }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: gateway
+          image: ghcr.io/nguyenbatam/arena_game_server:latest
+          envFrom: [{ configMapRef: { name: arena-static } }]
+          env:
+            - { name: ROLE, value: gateway }
+            - { name: NODE_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: HTTP_ADDR, value: ":8080" }
+            - { name: TCP_ADDR, value: ":8081" }
+            - { name: REDIS_ADDR, value: redis:6379 }
+            - { name: PUBLIC_ADDR, value: "ws://gateway.arena.svc.cluster.local:8080/ws" }
+            - name: ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: arena-admin, key: ADMIN_TOKEN } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: arena-admin, key: JWT_SECRET } }
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: arena-admin, key: REDIS_PASSWORD } }
+            # Every role needs the pool: the gateway serves the HTTP surface,
+            # the matchmaker reads ratings and ends abandoned turn matches, and
+            # the game servers write match results. Empty leaves it off.
+            - name: PLATFORM_DSN
+              valueFrom: { secretKeyRef: { name: arena-admin, key: PLATFORM_DSN } }
+          ports: [{ containerPort: 8080, name: http }, { containerPort: 8081, name: tcp }]
+          startupProbe: { httpGet: { path: /readyz, port: http }, failureThreshold: 30, periodSeconds: 2 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: arena
+spec:
+  selector: { app: gateway }
+  ports: [{ port: 8080, targetPort: 8080, name: http }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: arena
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: gateway }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: arena
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: gateway }
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }

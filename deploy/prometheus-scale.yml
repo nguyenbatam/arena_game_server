@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 2s
+scrape_configs:
+  - job_name: arena
+    static_configs:
+      - targets: ["gateway:8080"]
+        labels: { role: gateway }
+      - targets: ["matchmaker:8080"]
+        labels: { role: matchmaker }
+      - targets: ["gs1:8080"]
+        labels: { role: gameserver, node: gs-1 }
+      - targets: ["gs2:8080"]
+        labels: { role: gameserver, node: gs-2 }

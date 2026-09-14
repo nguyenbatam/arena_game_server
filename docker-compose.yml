@@ -1,0 +1,90 @@
+services:
+  redis:
+    image: redis:8.10.1-alpine
+    ports: ["6379:6379"]
+
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:29093,PLAINTEXT://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    ports: ["9092:9092"]
+
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      # A local placeholder, like the JWT_SECRET in backend.env.example. It is
+      # in the compose file rather than the env file because it has to match the
+      # PLATFORM_DSN below, and two places to change one password is one place
+      # too many. A deployment uses a secret and a managed database.
+      POSTGRES_USER: arena
+      POSTGRES_PASSWORD: arena
+      POSTGRES_DB: arena
+    ports: ["5432:5432"]
+    volumes:
+      - arena-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The server retries the connection for six seconds on its own, which
+      # covers a warm start. This covers a cold one, where initdb runs first.
+      test: ["CMD-SHELL", "pg_isready -U arena -d arena"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  server:
+    build: .
+    # Tunables come from backend.env (make env). Optional, so a fresh clone
+    # still comes up on the defaults baked into the binary.
+    env_file:
+      - path: backend.env
+        required: false
+    environment:
+      # Topology only. `environment` wins over `env_file`, so these container
+      # names cannot be broken by whatever is in the env file — and equally,
+      # nothing here should be a tunable, or the file would stop working.
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      PUBLIC_ADDR: "ws://localhost:8080/ws"
+      # The platform tier: accounts, wallets, inventory, history, leaderboard.
+      # Unset it (or set PLATFORM_DSN=memory) to run the realtime tier alone.
+      PLATFORM_DSN: "postgres://arena:arena@postgres:5432/arena?sslmode=disable"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "8082:8082/udp"
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9091:9090"]
+    depends_on: [server]
+
+volumes:
+  # Named, so `docker compose down` does not take the accounts with it. That is
+  # the whole difference between this tier and everything else in the stack:
+  # Redis and Kafka can be thrown away and rebuilt from play, and an account
+  # cannot be rebuilt from anything.
+  arena-pgdata:

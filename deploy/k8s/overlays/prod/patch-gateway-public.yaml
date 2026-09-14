@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: arena
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: PUBLIC_ADDR
+              value: "wss://arena.example.com/ws"
+            - name: ALLOWED_ORIGINS
+              value: "https://arena.example.com"

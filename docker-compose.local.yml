@@ -1,0 +1,7 @@
+# Local-dev overlay used by scripts/run_local_test.sh.
+# One browser can queue and still get a match (bots fill the rest).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+services:
+  server:
+    environment:
+      MIN_PLAYERS: "1"

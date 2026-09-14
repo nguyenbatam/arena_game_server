@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Arena — dedicated server demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  :root { --bg:#0b1020; --panel:#121a33; --line:#2a3a6a; --txt:#dce6ff; --acc:#5eead4; --hp:#f43f5e; --me:#38bdf8; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt); font:14px/1.4 ui-sans-serif,system-ui; }
+  #wrap { display:grid; grid-template-columns: 1fr 280px; height:100%; }
+  canvas { width:100%; height:100%; background:#070b16; display:block; }
+  aside { border-left:1px solid var(--line); padding:16px; background:var(--panel); overflow:auto; }
+  h1 { font-size:16px; margin:0 0 8px; letter-spacing:.04em; }
+  .muted { color:#8aa; font-size:12px; }
+  button, input { background:#1b2550; color:var(--txt); border:1px solid var(--line); padding:8px 10px; border-radius:8px; }
+  button { cursor:pointer; width:100%; margin-top:8px; }
+  button:hover { border-color:var(--acc); }
+  #log { font:11px/1.35 ui-monospace,monospace; white-space:pre-wrap; margin-top:12px; color:#9bb; max-height:220px; overflow:auto; }
+  .row { display:flex; justify-content:space-between; margin:4px 0; }
+  kbd { background:#0006; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <aside>
+    <h1>ARENA DS</h1>
+    <div class="muted">Authoritative server · fixed tick · WASD + mouse</div>
+    <div class="row"><span>status</span><b id="st">idle</b></div>
+    <div class="row"><span>tick</span><b id="tick">—</b></div>
+    <div class="row"><span>you</span><b id="you">—</b></div>
+    <div class="row"><span>rtt</span><b id="rtt">—</b></div>
+    <div class="row"><span>sync</span><b id="sync">—</b></div>
+    <div class="row"><span>predict</span><b id="pred">—</b></div>
+    <input id="name" placeholder="name" value="pilot"/>
+    <button id="go">Join queue</button>
+    <p class="muted"><kbd>W A S D</kbd> move · click fire · mouse aim</p>
+    <p class="muted">Chế độ khác: <a href="/turn.html" style="color:var(--acc)">turn-based</a> — cùng gateway, con trỏ là <code>seq</code> thay vì tick.</p>
+    <p class="muted"><a href="/platform.html" style="color:var(--acc)">Account, store &amp; ladder</a> — sign in there and this match lands in your history.</p>
+    <div id="scores"></div>
+    <div id="feed"></div>
+    <div id="log"></div>
+  </aside>
+</div>
+<script src="/pb.js"></script>
+<script src="/predict.js"></script>
+<script src="/platform.js"></script>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const MAP = 2000000;
+let ws, me = 0, tick = 0, snap = {players:[], projectiles:[]};
+// Snapshot history, mirroring the server ring. A delta names the baseline it
+// was built from; we can only apply it while we still hold that tick.
+let history = new Map(), ackTick = 0, nFull = 0, nDelta = 0, bytes = 0;
+let tickRate = 20;
+const predictor = new Predictor(tickRate);
+const interp = new Interpolator(100);
+function resetSync() { history.clear(); ackTick = 0; predictor.reset(); interp.reset(); }
+let keys = {w:0,a:0,s:0,d:0}, aim = 0, fire = false, seq = 0;
+let room = '', sessionId = crypto.randomUUID().slice(0, 16), accessToken = '';
+let autoJoin = false, reconnectTimer = 0, connGen = 0, lastURL = '';
+const logEl = document.getElementById('log');
+function log(s){ logEl.textContent = s + '\n' + logEl.textContent; }
+function wsURL(host) {
+  const q = 'id=' + encodeURIComponent(sessionId) + (accessToken ? '&token=' + encodeURIComponent(accessToken) : '');
+  if (host && host.startsWith('ws')) return host + (host.includes('?') ? '&' : '?') + q;
+  return (location.protocol==='https:'?'wss':'ws') + '://' + location.host + '/ws?' + q;
+}
+
+// The platform tier, when it is on, is where a session comes from: sign in at
+// /platform.html and the token is left in localStorage for this page to pick
+// up. Without it there is no anonymous door left — /auth/login stops accepting
+// a bare name, because every platform read is authorised by that same token.
+//
+// sessionFrom (in /platform.js, shared with that page) returns null rather than
+// an expired token, which is what makes the fallback below correct: a token the
+// server will reject is worse than none, since none falls back to a name.
+// sessionFrom is undefined when the page is served without /platform.js, so
+// this degrades to the anonymous path rather than throwing.
+function storedSession() {
+  try {
+    if (typeof sessionFrom !== 'function') return null;
+    return sessionFrom(localStorage.getItem('arena.session'), Date.now());
+  } catch { return null; }
+}
+
+async function ensureAuth() {
+  const stored = storedSession();
+  if (stored) {
+    sessionId = stored.player_id;
+    accessToken = stored.token;
+    log('signed in as ' + (stored.account ? stored.account.display_name : sessionId.slice(-8)));
+    return;
+  }
+  const name = document.getElementById('name').value || 'pilot';
+  try {
+    const r = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    if (r.status === 404) return;
+    if (r.status === 401) {
+      // The platform tier is on and a name is not a credential.
+      log('this server requires an account — sign in at /platform.html');
+      return;
+    }
+    if (!r.ok) throw new Error('login ' + r.status);
+    const j = await r.json();
+    sessionId = j.player_id;
+    accessToken = j.token;
+    log('auth ok id=' + sessionId.slice(-8));
+  } catch (e) {
+    log('auth skip/fail ' + e.message);
+  }
+}
+
+function resize(){ canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
+addEventListener('resize', resize); resize();
+
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = 1; });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = 0; });
+// The pointer in canvas coordinates, kept so the hitmarker has somewhere to be
+// drawn. The aim angle alone cannot say where the crosshair is on screen.
+const mouse = { x: 0, y: 0 };
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  const cx = r.width/2, cy = r.height/2;
+  mouse.x = (e.clientX - r.left) * canvas.width / r.width;
+  mouse.y = (e.clientY - r.top) * canvas.height / r.height;
+  aim = Math.round(Math.atan2(e.clientY-r.top-cy, e.clientX-r.left-cx) * 180/Math.PI);
+  if (aim < 0) aim += 360;
+});
+canvas.addEventListener('mousedown', () => fire = true);
+canvas.addEventListener('mouseup', () => fire = false);
+
+function connect(url, joinQueue) {
+  const gen = ++connGen;
+  lastURL = url || wsURL();
+  if (ws) try { ws.close(); } catch {}
+  ws = new WebSocket(lastURL);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    document.getElementById('st').textContent = 'connected';
+    // A new connection means a new signon state: the server restarts us from a
+    // full snapshot, so the old history is worthless and must not be acked.
+    resetSync();
+    ws.send(pbEncode.hello(document.getElementById('name').value, sessionId, accessToken));
+    if (room) ws.send(pbEncode.joinRoom(room, me, tick, sessionId));
+    else if (joinQueue) setTimeout(() => ws.readyState===1 && ws.send(pbEncode.joinQueue()), 50);
+  };
+  ws.onclose = () => {
+    if (gen !== connGen) return;
+    document.getElementById('st').textContent = 'closed';
+    if (room && !reconnectTimer) {
+      reconnectTimer = setTimeout(() => { reconnectTimer = 0; connect(lastURL, false); }, 500);
+    }
+  };
+  ws.onmessage = ev => {
+    const m = pbDecode(ev.data);
+    if (m.t === MsgType.WELCOME) {
+      if (m.tick_rate) { tickRate = m.tick_rate; predictor.setTickRate(tickRate); }
+      log('welcome tick_rate=' + m.tick_rate);
+    }
+    if (m.t === MsgType.QUEUED) { document.getElementById('st').textContent = 'queued'; log('queued'); }
+    if (m.t === MsgType.MATCH_FOUND || m.t === MsgType.REDIRECT) {
+      room = m.room_id; me = m.your_id;
+      if (m.tick_rate) { tickRate = m.tick_rate; predictor.setTickRate(tickRate); }
+      document.getElementById('you').textContent = me;
+      document.getElementById('st').textContent = 'match ' + (room||'').slice(-6);
+      log('match id=' + me + ' host=' + (m.host||'local'));
+      resetSync();
+      if (m.host) { connect(wsURL(m.host), false); return; }
+    }
+    if (m.t === MsgType.SNAPSHOT) {
+      bytes += ev.data.byteLength;
+      if (m.baseline_tick) nDelta++; else nFull++;
+
+      const applied = pbApplyDelta(m.baseline_tick ? history.get(m.baseline_tick) : null, m);
+      if (!applied) {
+        // Baseline we no longer hold. Keep acking the last good tick — the
+        // server keeps encoding from there until an ack moves it forward.
+        document.getElementById('sync').textContent = 'stalled @' + ackTick;
+        return;
+      }
+      history.set(applied.tick, applied);
+      for (const t of history.keys()) if (t + SNAPSHOT_HISTORY <= applied.tick) history.delete(t);
+      if (applied.tick <= ackTick) return;
+      ackTick = applied.tick;
+
+      tick = applied.tick; snap = applied; m = applied;
+
+      // Reconcile our own position, interpolate everyone else.
+      const mine = applied.players.find(p => p.id === me);
+      if (mine) {
+        predictor.reconcile(mine.x, mine.y, mine.seq || 0, mine.hp > 0);
+        document.getElementById('pred').textContent =
+          'err ' + predictor.error + ' · replay ' + predictor.replays;
+      }
+      interp.push(applied, performance.now());
+
+      document.getElementById('tick').textContent = tick;
+      document.getElementById('sync').textContent =
+        nDelta + 'Δ/' + nFull + 'F · ' + Math.round(bytes / (nDelta + nFull)) + 'B avg';
+      if (m.ended) {
+        // winner 0 is a draw, not seat zero: no seat holds that id, and the
+        // server reports it when the top score is shared. turn.html reads the
+        // same field the same way.
+        const outcome = m.winner ? ('winner=' + m.winner) : 'draw';
+        document.getElementById('st').textContent = 'ended ' + outcome;
+        room = '';
+        log('match_end ' + outcome);
+      }
+      const sc = (m.players||[]).map(p => `<div class="row"><span>#${p.id}${p.bot?' bot':''}${p.id===me?' ←':''}</span><b>${p.score}</b></div>`).join('');
+      document.getElementById('scores').innerHTML = sc;
+      consumeEvents(applied);
+    }
+    if (m.t === MsgType.PONG) document.getElementById('rtt').textContent = (Date.now()-m.nonce) + 'ms';
+    if (m.t === MsgType.ERROR) log('err ' + m.error);
+  };
+}
+
+document.getElementById('go').onclick = async () => {
+  room = ''; me = 0;
+  await ensureAuth();
+  connect(wsURL(), true);
+};
+
+setInterval(() => {
+  if (!ws || ws.readyState !== 1 || !me) return;
+  seq++;
+  const mx = (keys.d?1:0)-(keys.a?1:0), my = (keys.s?1:0)-(keys.w?1:0);
+  const mine = (snap.players||[]).find(p => p.id === me);
+  // Move now, correct later — do not wait a round-trip to see the key land.
+  predictor.record(seq, mx, my, !mine || mine.hp > 0);
+  // interp.delay is the whole reason this is sent: we draw everyone else that
+  // far in the past, so that is how stale the world we just aimed at was.
+  ws.send(pbEncode.input(seq, mx, my, fire, aim, ackTick, interp.delay));
+}, 50);
+
+setInterval(() => { if (ws && ws.readyState===1) ws.send(pbEncode.ping(Date.now())); }, 2000);
+
+
+// ---------------------------------------------------------------------------
+// Gameplay events.
+//
+// A snapshot replicates state, and state cannot carry a discrete fact: two hits
+// inside one delta window are a single HP change, and a death followed by a
+// respawn is no change at all. So the server sends what happened as well as
+// what is true, and this is where a hitmarker and a killfeed come from.
+//
+// They are reliable without a channel of their own: a delta carries every event
+// since the tick we acknowledged, so losing a packet makes the next message
+// carry more events exactly as it makes it carry more state.
+//
+// The cost of that is repeats. Our ack rides on the next input and reaches the
+// server a round trip later, so until it lands the server keeps encoding
+// against the same baseline — and keeps resending the same events. Consuming by
+// *tick* rather than by event is what makes that idempotent, and it is exact
+// because a delta carries whole ticks: either we have everything up to tick T
+// or we have nothing from it. Deduplicating on the event's own fields would be
+// wrong instead of merely repetitive, because two shots from one player can
+// land on one target in one tick and they are two hits, not one.
+let lastEventTick = 0;
+const feed = [];        // recent lines, newest last
+let hitAt = 0;          // when we last landed a shot
+let hurtAt = 0;         // when we last took one
+
+function consumeEvents(applied) {
+  for (const e of applied.events || []) {
+    if (e.tick <= lastEventTick) continue;
+    ingestEvent(e);
+  }
+  // Everything up to this message's tick is now consumed, whether or not it
+  // carried events for every tick in the span.
+  lastEventTick = Math.max(lastEventTick, applied.tick);
+}
+
+function who(id) { return id === me ? 'you' : '#' + id; }
+
+function ingestEvent(e) {
+  const now = performance.now();
+  if (e.kind === GameEventKind.HIT) {
+    if (e.actor === me) hitAt = now;
+    if (e.target === me) hurtAt = now;
+    return; // hits are felt, not listed; the feed would be nothing else
+  }
+  if (e.kind === GameEventKind.KILL) {
+    if (e.actor === me) hitAt = now;
+    feed.push({ at: now, text: `${who(e.actor)} → ${who(e.target)}` });
+  } else if (e.kind === GameEventKind.DEPART) {
+    feed.push({ at: now, text: `${who(e.target)} left` });
+  }
+  while (feed.length > 6) feed.shift();
+}
+
+const FEED_MS = 6000;
+setInterval(() => {
+  const now = performance.now();
+  while (feed.length && now - feed[0].at > FEED_MS) feed.shift();
+  document.getElementById('feed').innerHTML =
+    feed.map(f => `<div class="row" style="opacity:${(1 - (now - f.at) / FEED_MS).toFixed(2)}"><span>${f.text}</span></div>`).join('');
+}, 200);
+
+function draw() {
+  requestAnimationFrame(draw);
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#070b16'; ctx.fillRect(0,0,w,h);
+  const scale = Math.min(w,h) / MAP * 0.92;
+  const ox = (w - MAP*scale)/2, oy = (h - MAP*scale)/2;
+  ctx.strokeStyle = '#1a274c'; ctx.strokeRect(ox,oy,MAP*scale,MAP*scale);
+  ctx.strokeStyle = '#12203c';
+  for (let i=1;i<8;i++){
+    ctx.beginPath(); ctx.moveTo(ox+i*MAP*scale/8, oy); ctx.lineTo(ox+i*MAP*scale/8, oy+MAP*scale); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox, oy+i*MAP*scale/8); ctx.lineTo(ox+MAP*scale, oy+i*MAP*scale/8); ctx.stroke();
+  }
+  const to = (x,y) => [ox + x*scale, oy + y*scale];
+  for (const p of snap.projectiles||[]) {
+    const [x,y] = to(p.x,p.y);
+    ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(x,y,3,0,6.28); ctx.fill();
+  }
+  const others = interp.at(performance.now(), me);
+  const mineSnap = (snap.players||[]).find(p => p.id === me);
+  const drawList = others.slice();
+  if (mineSnap) {
+    // Our own dot comes from the predictor, not the snapshot: the snapshot is
+    // always one round-trip stale.
+    const pp = predictor.ready ? predictor.pos() : mineSnap;
+    drawList.push({ ...mineSnap, x: pp.x, y: pp.y, aim });
+  }
+  for (const p of drawList) {
+    const [x,y] = to(p.x,p.y);
+    ctx.fillStyle = p.id===me ? '#38bdf8' : (p.bot ? '#64748b' : '#a78bfa');
+    ctx.globalAlpha = p.hp<=0 ? 0.25 : 1;
+    ctx.beginPath(); ctx.arc(x,y,8,0,6.28); ctx.fill();
+    ctx.globalAlpha = 1;
+    const rad = p.aim * Math.PI/180;
+    ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+Math.cos(rad)*14, y+Math.sin(rad)*14); ctx.stroke();
+    ctx.fillStyle = '#1e293b'; ctx.fillRect(x-10,y-16,20,3);
+    ctx.fillStyle = '#22c55e'; ctx.fillRect(x-10,y-16,20*(p.hp/100),3);
+  }
+
+  // A hitmarker on the crosshair when one of our shots lands, and a red edge
+  // when one of theirs does. Neither is reconstructible from PlayerSnap: the
+  // first is somebody else's HP changing by an amount we cannot attribute, and
+  // the second is ours changing twice inside one message.
+  const now = performance.now();
+  const MARK_MS = 220;
+  if (now - hitAt < MARK_MS) {
+    const a = 1 - (now - hitAt) / MARK_MS;
+    const [cx, cy] = [mouse.x, mouse.y];
+    ctx.strokeStyle = `rgba(248,250,252,${a.toFixed(2)})`;
+    ctx.lineWidth = 2;
+    for (const [dx, dy] of [[-1,-1],[1,-1],[-1,1],[1,1]]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + dx*5, cy + dy*5);
+      ctx.lineTo(cx + dx*11, cy + dy*11);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+  }
+  const HURT_MS = 400;
+  if (now - hurtAt < HURT_MS) {
+    const a = 0.35 * (1 - (now - hurtAt) / HURT_MS);
+    ctx.fillStyle = `rgba(239,68,68,${a.toFixed(2)})`;
+    ctx.fillRect(0, 0, w, h);
+  }
+}
+draw();
+</script>
+</body>
+</html>

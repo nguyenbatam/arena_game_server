@@ -1,0 +1,10 @@
+# bin
+/bin/
+/tmp/
+*.exe
+*.test
+*.out
+.DS_Store
+.env
+pprof/
+coverage.*

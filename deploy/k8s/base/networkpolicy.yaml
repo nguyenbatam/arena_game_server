@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: arena-default
+  namespace: arena
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    # A managed Postgres lives outside this namespace and outside the cluster,
+    # so PLATFORM_DSN pointing at one needs an egress rule. It is left commented
+    # rather than opened to 0.0.0.0/0 on principle: a default-deny egress policy
+    # whose database rule is "anywhere on 5432" is a policy that has stopped
+    # saying anything. Narrow the ipBlock to the instance and uncomment.
+    #
+    # Applying the manifests with a DSN set and this rule missing fails loudly —
+    # the server retries for six seconds and then refuses to start — rather than
+    # degrading quietly, which is why leaving it commented is safe.
+    #
+    # - to:
+    #     - ipBlock: { cidr: 10.0.0.0/24 }
+    #   ports:
+    #     - protocol: TCP
+    #       port: 5432

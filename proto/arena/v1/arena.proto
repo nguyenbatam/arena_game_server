@@ -1,0 +1,490 @@
+syntax = "proto3";
+
+package arena.v1;
+
+option go_package = "github.com/nguyenbatam/arena_game_server/gen/pb";
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_ALL = 1;
+  ROLE_GATEWAY = 2;
+  ROLE_MATCHMAKER = 3;
+  ROLE_GAME_SERVER = 4;
+}
+
+enum MsgType {
+  MSG_TYPE_UNSPECIFIED = 0;
+  MSG_TYPE_HELLO = 1;
+  MSG_TYPE_WELCOME = 2;
+  MSG_TYPE_JOIN_QUEUE = 3;
+  MSG_TYPE_QUEUED = 4;
+  MSG_TYPE_MATCH_FOUND = 5;
+  MSG_TYPE_JOIN_ROOM = 6;
+  MSG_TYPE_INPUT = 7;
+  MSG_TYPE_SNAPSHOT = 8;
+  MSG_TYPE_PING = 9;
+  MSG_TYPE_PONG = 10;
+  MSG_TYPE_ERROR = 11;
+  MSG_TYPE_REDIRECT = 12;
+  // Turn-based mode: an event-log game (family C) riding the same gateway,
+  // auth, presence and session plumbing as the realtime arena.
+  MSG_TYPE_TURN_JOIN = 13;
+  MSG_TYPE_TURN_PLAY = 14;
+  MSG_TYPE_TURN_SYNC = 15;
+  MSG_TYPE_TURN_UPDATE = 16;
+}
+
+enum TurnEventKind {
+  TURN_EVENT_KIND_UNSPECIFIED = 0;
+  TURN_EVENT_KIND_DEALT = 1;
+  TURN_EVENT_KIND_PLAYED = 2;
+  TURN_EVENT_KIND_TRICK = 3;
+  TURN_EVENT_KIND_TIMEOUT = 4;
+  TURN_EVENT_KIND_ENDED = 5;
+}
+
+enum PresenceStatus {
+  PRESENCE_STATUS_UNSPECIFIED = 0;
+  PRESENCE_STATUS_ONLINE = 1;
+  PRESENCE_STATUS_QUEUED = 2;
+  PRESENCE_STATUS_IN_MATCH = 3;
+  PRESENCE_STATUS_DISCONNECTED = 4;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_MATCH_STARTED = 1;
+  EVENT_TYPE_MATCH_ENDED = 2;
+  EVENT_TYPE_PLAYER_DISCONNECT = 3;
+  EVENT_TYPE_PLAYER_RECONNECT = 4;
+}
+
+enum TickRate {
+  TICK_RATE_UNSPECIFIED = 0;
+  TICK_RATE_HZ_20 = 20;
+  TICK_RATE_HZ_30 = 30;
+  TICK_RATE_HZ_60 = 60;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_BAD_PAYLOAD = 1;
+  ERROR_CODE_WRONG_ROLE = 2;
+  ERROR_CODE_ROOM_NOT_ON_NODE = 3;
+  ERROR_CODE_ROOM_NOT_FOUND = 4;
+  ERROR_CODE_UNAUTHORIZED = 5;
+  ERROR_CODE_RATE_LIMITED = 6;
+  // The client speaks a protocol this build no longer accepts. Distinct from
+  // BAD_PAYLOAD: the bytes parsed fine, the contract is what does not match,
+  // and the client's move is to update rather than to retry.
+  ERROR_CODE_VERSION_MISMATCH = 7;
+  ERROR_CODE_SERVER_FULL = 8;
+}
+
+message Envelope {
+  MsgType type = 1;
+  oneof payload {
+    Hello hello = 2;
+    Welcome welcome = 3;
+    JoinQueue join_queue = 4;
+    Queued queued = 5;
+    MatchFound match_found = 6;
+    JoinRoom join_room = 7;
+    Input input = 8;
+    Snapshot snapshot = 9;
+    Ping ping = 10;
+    Pong pong = 11;
+    Error error = 12;
+    Redirect redirect = 13;
+    TurnJoin turn_join = 14;
+    TurnPlay turn_play = 15;
+    TurnSync turn_sync = 16;
+    TurnUpdate turn_update = 17;
+  }
+}
+
+message Hello {
+  string name = 1;
+  string session_id = 2;
+  string access_token = 3;
+  // UDP only: proof that this sender can receive at the address it claims.
+  // Obtained by sending a HELLO without one and echoing back what comes back.
+  // Ignored by the connection-oriented transports, which get this for free
+  // from the TCP handshake.
+  bytes addr_token = 4;
+  // UDP only: zero bytes padding the first datagram up to the minimum the
+  // server accepts, so its cookie reply can never be larger than the request
+  // that triggered it. QUIC pads its Initial packets for exactly this reason.
+  bytes padding = 5;
+  // Wire-contract version this client was built against. Sent on every HELLO
+  // so an incompatible build is turned away at the door with a reason it can
+  // show the player, instead of desyncing halfway into a match. Zero means a
+  // client older than this field, which the server treats as version 1.
+  uint32 protocol_version = 6;
+}
+
+message Welcome {
+  uint32 your_id = 1;
+  int32 tick_rate = 2;
+  int32 map_w = 3;
+  int32 map_h = 4;
+  string session_id = 5;
+  // What the server speaks. A client one version behind can say so rather than
+  // guessing why a later message looked wrong.
+  uint32 protocol_version = 6;
+}
+
+message JoinQueue {}
+
+message Queued {}
+
+message MatchFound {
+  string room_id = 1;
+  string host = 2;
+  uint32 your_id = 3;
+  int64 seed = 4;
+  int32 tick_rate = 5;
+  int32 map_w = 6;
+  int32 map_h = 7;
+}
+
+message JoinRoom {
+  string room_id = 1;
+  uint32 your_id = 2;
+  uint32 last_ack_tick = 3;
+  string session_id = 4;
+}
+
+message Input {
+  uint32 player_id = 1;
+  uint32 seq = 2;
+  sint32 mx = 3;
+  sint32 my = 4;
+  bool fire = 5;
+  sint32 aim = 6;
+  // Highest snapshot tick this client has fully applied. The server deltas
+  // against it and never advances the baseline on its own.
+  uint32 ack_tick = 7;
+  // How far behind the newest snapshot this client draws everyone else, in
+  // milliseconds — Source calls it cl_interp. A client that interpolates is
+  // aiming at a world older than ack_tick by this much, and lag compensation
+  // that ignores it compensates a world the shooter was never shown.
+  //
+  // Milliseconds rather than ticks because the room's rate is configurable and
+  // the client's render delay is not a function of it; the server converts.
+  // Clamped server-side: this is a client-declared figure, which makes it a
+  // dial, and the clamp is the only thing that stops it being a useful one.
+  // Zero is the honest answer for a client that does not interpolate at all.
+  uint32 interp_ms = 8;
+}
+
+// Bits of PlayerSnap.changed. Only meaningful in a delta snapshot
+// (Snapshot.baseline_tick != 0); a full snapshot carries every field.
+enum PlayerField {
+  PLAYER_FIELD_UNSPECIFIED = 0;
+  PLAYER_FIELD_X = 1;
+  PLAYER_FIELD_Y = 2;
+  PLAYER_FIELD_AIM = 4;
+  PLAYER_FIELD_HP = 8;
+  PLAYER_FIELD_SCORE = 16;
+  PLAYER_FIELD_BOT = 32;
+  PLAYER_FIELD_SEQ = 64;
+}
+
+message PlayerSnap {
+  uint32 id = 1;
+  sint32 x = 2;
+  sint32 y = 3;
+  sint32 aim = 4;
+  sint32 hp = 5;
+  uint32 score = 6;
+  bool bot = 7;
+  // Last Input.seq the server has applied for this player. The client uses
+  // its own entry to discard acknowledged inputs and replay the rest on top
+  // of the authoritative position.
+  uint32 seq = 9;
+  // Which fields this message actually carries. A field whose bit is clear
+  // keeps its baseline value; a field whose bit is set is applied even when
+  // proto3 elides it from the wire as a zero value.
+  uint32 changed = 8;
+}
+
+message ProjSnap {
+  uint32 id = 1;
+  sint32 x = 2;
+  sint32 y = 3;
+}
+
+// GameEventKind is something that happened, as opposed to something that is
+// true.
+//
+// A snapshot replicates state, and state cannot carry a discrete fact: two hits
+// inside one delta window are a single HP change, and a death followed by a
+// respawn is no change at all. That is what makes a killfeed, a hitmarker and a
+// damage number impossible to reconstruct from PlayerSnap — the client can see
+// that HP fell, never that it fell twice or who did it.
+enum GameEventKind {
+  GAME_EVENT_KIND_UNSPECIFIED = 0;
+  // HIT: target took damage and survived it.
+  GAME_EVENT_KIND_HIT = 1;
+  // KILL: target's HP reached zero. Always preceded by the HIT that did it.
+  GAME_EVENT_KIND_KILL = 2;
+  // DEPART: target's avatar left the world because their connection did.
+  GAME_EVENT_KIND_DEPART = 3;
+}
+
+// GameEvent is one such fact.
+//
+// Events are carried in the snapshot that reports the ticks they happened on,
+// and a delta carries every event since the baseline the client acknowledged —
+// which is what makes them reliable without a second channel or an ack scheme
+// of their own. Losing a packet makes the next delta carry more events, exactly
+// as it makes it carry more state. See Snapshot.events.
+message GameEvent {
+  // The tick this happened on. A delta spans several, so the client cannot
+  // infer it from Snapshot.tick.
+  uint32 tick = 1;
+  GameEventKind kind = 2;
+  // Who caused it — the shooter. Zero when nobody did, which is every DEPART.
+  uint32 actor = 3;
+  // Who it happened to.
+  uint32 target = 4;
+  // The target's HP after the event. Present on HIT, zero on KILL and DEPART.
+  sint32 hp = 5;
+}
+
+message Snapshot {
+  uint32 tick = 1;
+  string room_id = 2;
+  repeated PlayerSnap players = 3;
+  repeated ProjSnap projectiles = 4;
+  bool ended = 5;
+  uint32 winner = 6;
+  // 0 = full snapshot (everything present, no baseline needed).
+  // Otherwise the tick this delta is encoded against; the client must have
+  // that tick in its own history to apply this message.
+  uint32 baseline_tick = 7;
+  // Projectiles present in the baseline that no longer exist.
+  repeated uint32 removed_projectiles = 8;
+  // What happened between baseline_tick and tick, in the order it happened.
+  //
+  // On a full snapshot this carries only the current tick: a client with no
+  // baseline has just resynced and has nothing to attach older events to.
+  //
+  // Capped — see room.MaxSnapshotEvents. A client far enough behind that its
+  // window overflows the cap keeps the most recent events and loses the
+  // oldest, because a message that does not fit in a datagram is worth less
+  // than a killfeed with a gap in it.
+  repeated GameEvent events = 9;
+}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+  uint32 ts_ms = 2;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message Redirect {
+  string room_id = 1;
+  string host = 2;
+  uint32 your_id = 3;
+}
+
+message QueuePlayer {
+  string conn_id = 1;
+  string player_id = 2;
+  string name = 3;
+  int32 skill = 4;
+  int64 queued_at = 5;
+}
+
+message Seat {
+  string conn_id = 1;
+  uint32 player_id = 2;
+  string name = 3;
+  // When this player entered the queue. Carried all the way to the game server
+  // so that a node refusing the placement can put them back where they were
+  // rather than at the back: the refusal is the server's problem, and charging
+  // the player another full queue wait for it is how a capacity ceiling turns
+  // into a player-visible outage.
+  int64 queued_at = 4;
+}
+
+message RoomRequest {
+  string room_id = 1;
+  int64 seed = 2;
+  int32 tick_rate = 3;
+  uint32 match_ticks = 4;
+  repeated Seat seats = 5;
+  int32 bots = 6;
+}
+
+message Assignment {
+  string conn_id = 1;
+  uint32 player_id = 2;
+  string name = 3;
+  string room_id = 4;
+  string host = 5;
+  int64 seed = 6;
+  int32 tick_rate = 7;
+}
+
+message GameServer {
+  string id = 1;
+  string public_addr = 2;
+  int32 rooms = 3;
+  int32 ccu = 4;
+  int64 updated_at = 5;
+  // How many rooms this node will accept, 0 meaning it declares no ceiling.
+  // Placement skips a node already at its capacity: balancing alone never
+  // refuses anything, so a full fleet keeps stacking rooms onto nodes that are
+  // already missing their tick budget.
+  int32 capacity = 6;
+  // Set while the node is draining. It keeps its rooms until they end but
+  // takes no new ones, which is what makes a rolling deploy stop cutting
+  // matches in half.
+  bool draining = 7;
+}
+
+message RoomInfo {
+  string room_id = 1;
+  string server_id = 2;
+  string public_addr = 3;
+  repeated string players = 4;
+  int64 seed = 5;
+}
+
+message Presence {
+  string player_id = 1;
+  string name = 2;
+  string node_id = 3;
+  PresenceStatus status = 4;
+  string room_id = 5;
+  uint32 seat_id = 6;
+  uint32 last_tick = 7;
+  int64 seen = 8;
+}
+
+message Event {
+  EventType type = 1;
+  string room_id = 2;
+  string player_id = 3;
+  int64 ts = 4;
+  uint32 players = 5;
+  int32 bots = 6;
+  string gs = 7;
+  uint32 winner = 8;
+  uint32 tick = 9;
+}
+
+message DynamicConfig {
+  int32 tick_rate = 1;
+  int32 room_size = 2;
+  int32 min_players = 3;
+  int64 queue_timeout_ms = 4;
+  int32 match_seconds = 5;
+  int64 disconnect_grace_ms = 6;
+  int32 send_buffer = 7;
+  int32 max_ccu = 8;
+  // Rating spread a match may open with, and how fast that spread grows for
+  // each second the longest-waiting player has been in the queue. These are
+  // live-ops knobs by nature: the right width depends on how many people are
+  // playing right now, which is exactly what you cannot know at build time.
+  // A negative skill_window turns skill matching off; zero leaves it alone.
+  int32 skill_window = 9;
+  int32 skill_widen = 10;
+  int32 skill_max_window = 11;
+}
+
+
+// ---------------------------------------------------------------------------
+// Turn-based mode (sync family C: event log + sequence number)
+//
+// Unlike the arena, state here changes rarely and every change matters, so the
+// wire carries ordered events rather than snapshots, and the cursor is a
+// sequence number instead of a tick.
+// ---------------------------------------------------------------------------
+
+message TurnEvent {
+  uint64 seq = 1;
+  TurnEventKind kind = 2;
+  // The player's durable identity (account / session id), not a per-gateway
+  // number. Two gateways minting their own ids would collide the moment both
+  // their players landed in one match.
+  string player_id = 3;
+  // 0 when this card is still hidden from the viewer this event was projected
+  // for. The log always holds the true value; the projection is what ships.
+  uint32 card = 4;
+  uint32 hand_count = 5;
+  // Only ever populated for the player the hand belongs to.
+  repeated uint32 hand = 6;
+  string winner = 7;
+  int64 deadline_unix_ms = 8;
+}
+
+message TurnState {
+  string match_id = 1;
+  uint64 seq = 2;
+  string turn = 3;
+  // Monotonic turn counter, used as a compare-and-set token so a move and a
+  // timeout firing at the same instant cannot both apply.
+  uint32 turn_number = 4;
+  repeated uint32 your_hand = 5;
+  uint32 opponent_hand_count = 6;
+  uint32 your_score = 7;
+  uint32 opponent_score = 8;
+  uint32 table_card = 9;
+  string table_owner = 10;
+  bool ended = 11;
+  string winner = 12;
+  int64 deadline_unix_ms = 13;
+  // Who this projection was built for. A viewer cannot infer it from the rest:
+  // after a full resync there are no events to read it off, and the state
+  // deliberately never names the opponent's cards.
+  string your_id = 14;
+}
+
+message TurnJoin { string match_id = 1; }
+
+message TurnPlay {
+  string match_id = 1;
+  uint32 card = 2;
+  uint32 turn_number = 3;
+  // Client retries are expected on a flaky link; the key makes a replayed
+  // submission a no-op instead of a second move.
+  string idem_key = 4;
+}
+
+message TurnSync {
+  string match_id = 1;
+  uint64 since_seq = 2;
+}
+
+message TurnUpdate {
+  // Set when the cursor is too old to diff from: the log window has moved past
+  // it, so the client must drop what it has and take the state wholesale.
+  bool full_resync = 1;
+  TurnState state = 2;
+  repeated TurnEvent events = 3;
+  uint64 current_seq = 4;
+}
+
+// TurnPush carries one player's TurnUpdate to whichever node is holding their
+// connection.
+//
+// The node that decides a move is routinely not the node the player is
+// attached to: the two players in a match may sit on different gateways, and a
+// turn that expires is applied by the matchmaker, which holds no player
+// connections at all. Assignment travels the same way for the same reason.
+message TurnPush {
+  string player_id = 1;
+  TurnUpdate update = 2;
+}

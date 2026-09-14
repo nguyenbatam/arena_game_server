@@ -1,0 +1,95 @@
+# Horizontal scaling: 1 matchmaker + 1 gateway + 2 gameservers, shared Redis and
+# one shared Postgres — every role opens its own pool, so PLATFORM_MAX_CONNS
+# multiplies by the number of replicas.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build
+services:
+  server:
+    profiles: ["monolith"]
+
+  gateway:
+    build: .
+    environment:
+      ROLE: gateway
+      NODE_ID: gw-1
+      HTTP_ADDR: ":8080"
+      TCP_ADDR: ":8081"
+      UDP_ADDR: ":8082"
+      PUBLIC_ADDR: "ws://localhost:8080/ws"
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      PLATFORM_DSN: "postgres://arena:arena@postgres:5432/arena?sslmode=disable"
+      ENV: production
+      DRAIN_TIMEOUT: 45s
+      SHUTDOWN_TIMEOUT: 15s
+    ports: ["8080:8080", "8081:8081"]
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  matchmaker:
+    build: .
+    environment:
+      ROLE: matchmaker
+      NODE_ID: mm-1
+      HTTP_ADDR: ":8080"
+      ROOM_SIZE: "8"
+      MIN_PLAYERS: "2"
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      PLATFORM_DSN: "postgres://arena:arena@postgres:5432/arena?sslmode=disable"
+    ports: ["8082:8080"]
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  gs1:
+    build: .
+    environment:
+      ROLE: gameserver
+      NODE_ID: gs-1
+      HTTP_ADDR: ":8080"
+      TCP_ADDR: ":8081"
+      UDP_ADDR: ":8082"
+      PUBLIC_ADDR: "ws://localhost:8090/ws"
+      TICK_RATE: "20"
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      PLATFORM_DSN: "postgres://arena:arena@postgres:5432/arena?sslmode=disable"
+    ports: ["8090:8080", "8091:8081"]
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  gs2:
+    build: .
+    environment:
+      ROLE: gameserver
+      NODE_ID: gs-2
+      HTTP_ADDR: ":8080"
+      TCP_ADDR: ":8081"
+      UDP_ADDR: ":8082"
+      PUBLIC_ADDR: "ws://localhost:8092/ws"
+      TICK_RATE: "20"
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      PLATFORM_DSN: "postgres://arena:arena@postgres:5432/arena?sslmode=disable"
+    ports: ["8092:8080", "8093:8081"]
+    depends_on:
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
